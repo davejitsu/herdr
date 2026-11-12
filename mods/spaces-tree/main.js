@@ -413,6 +413,7 @@ export default class Spaces extends View {
         this.toggleDir(key, cx);
       })
       .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none())
+      .child(svg("mods/workspace-chrome/folder.svg").size(12).flex_none().text_color(folded && attention ? t[attention] : t.dim))
       // While the × asks, the name gives way to what the close stops.
       .when(asking, (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.blocked)
         .child(`Close ${plural(ids.length, "space")}?${risk ? ` ${risk}` : ""}`)))
@@ -424,7 +425,7 @@ export default class Spaces extends View {
         .when(!asking, (el) => el.child(div().id(`dir-new-${key}`).flex_none().px(4).rounded(4).tooltip(`New terminal in ${path}`)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { folder: path, machine: machine ?? "" }); })
-          .child("+")))
+          .child(svg("mods/workspace-chrome/plus.svg").size(11))))
         .child(this.closeGroup(key, ids, t)));
   }
 
@@ -475,7 +476,7 @@ export default class Spaces extends View {
         }
         cx.notify();
       })
-      .child(asking ? "Close" : "×");
+      .child(asking ? "Close" : svg("mods/workspace-chrome/x.svg").size(11));
   }
 
   // The rows, under a header per machine once one isn't this computer.
@@ -512,7 +513,7 @@ export default class Spaces extends View {
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
-    const loadingRow = m => h_flex().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).items_center().when(collapsed, el => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
+    const loadingRow = m => h_flex().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().when(collapsed, el => el.justify_center()).text_size(12).text_color(t.dim).child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().spin(900)).when(!collapsed, el => el.child("Loading…"));
     if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : rows.flatMap(draw);
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
@@ -550,7 +551,7 @@ export default class Spaces extends View {
               .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
               .child(repair?.busy ? "Connecting…" : "Connect"))))
           .when(connected && this.hoverHead === `machine:${m ?? ""}`, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
+            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child(svg("mods/workspace-chrome/plus.svg").size(11))))
           .when(folded && Boolean(attention), el => el.child(attentionBadge(t, attention, `machine-attention-${m ?? "local"}`)))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
           .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
@@ -603,9 +604,12 @@ export default class Spaces extends View {
       .items_center()
       .text_size(11.5)
       .text_color(t.dim)
-      .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
-      .when(g.changes > 0, (el) => el.child(div().id(`changes-${id}`).flex_none().text_color(t.ansi3)
-        .tooltip(`${g.changes} changed file${g.changes === 1 ? "" : "s"}`).child(`~${g.changes}`)))
+      .when(Boolean(where), (el) => el.child(h_flex().min_w(0).gap(3).items_center()
+        .when(Boolean(branch), (el) => el.child(svg("mods/workspace-chrome/git-branch.svg").size(11).flex_none()))
+        .child(div().min_w(0).truncate().child(where))))
+      .when(g.changes > 0, (el) => el.child(h_flex().id(`changes-${id}`).flex_none().gap(2).items_center().text_color(t.ansi3)
+        .tooltip(`${g.changes} changed file${g.changes === 1 ? "" : "s"}`)
+        .child(svg("mods/workspace-chrome/square-pen.svg").size(10).flex_none()).child(String(g.changes))))
       .when(g.ahead > 0, (el) => el.child(div().id(`ahead-${id}`).flex_none().text_color(t.ansi2)
         .tooltip(`${plural(g.ahead, "commit")} not pushed`).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().id(`behind-${id}`).flex_none().text_color(t.ansi1)
@@ -707,9 +711,11 @@ export default class Spaces extends View {
         openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: w.id } } });
       })
       .child(div().text_color(t.dim).child("└"))
+      .when(!program?.icon, el => el.child(svg("mods/workspace-chrome/terminal.svg").size(13).flex_none().text_color(t.dim)))
       .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).flex_none().text_color(t.muted) : image(program.icon).size(14).flex_none()))
       .child(div().flex_1().min_w(0).truncate().child(tab.name))
-      .when(tab.settled, el => el.child(div().text_color(t.dim).child("settled")))
+      .when(tab.settled, el => el.child(h_flex().gap(3).items_center().text_color(t.dim)
+        .child(svg("mods/workspace-chrome/circle-check.svg").size(11).flex_none()).child("settled")))
       .when(tab.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(tab.status === "blocked" || tab.status === "done", el => el.child(div().size(6).rounded(3).bg(t[tab.status])));
   }
@@ -755,7 +761,7 @@ export default class Spaces extends View {
         folded.delete(key);
         setDirsFolded(folded);
       } },
-      { id: "copy", icon: "file-text", label: "Copy path", act: (cx) => cx.write_to_clipboard(path) },
+      { id: "copy", icon: "files", label: "Copy path", act: (cx) => cx.write_to_clipboard(path) },
       { id: "close", icon: "x", label: `Close group (${plural(ids.length, "space")})`, note: risk, danger: true,
         act: () => { for (const id of ids) run("space.close", { id }); } },
     ];
@@ -800,7 +806,8 @@ export default class Spaces extends View {
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(collapsed, el => el.pl(0).pr(0).justify_center())
-        .when(!collapsed, el => el.child("Spaces"))
+        .when(!collapsed, el => el.child(h_flex().gap(6).items_center()
+          .child(svg("mods/workspace-chrome/layers.svg").size(12).flex_none()).child("Spaces")))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")

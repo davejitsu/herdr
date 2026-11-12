@@ -490,7 +490,8 @@ export default class Agents extends View {
             .flex_none()
             .items_center()
             .justify_between()
-            .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Agents"))
+            .child(h_flex().gap(6).items_center().text_size(11.5).font_medium().text_color(t.dim)
+              .child(svg("mods/workspace-chrome/terminal.svg").size(12).flex_none()).child("Agents"))
             .child(
               div()
                 .id("ag-sort")
@@ -504,7 +505,8 @@ export default class Agents extends View {
         ),
       )
       .when(list.length === 0 && !collapsed, (el) =>
-        el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
+        el.child(h_flex().px(12).gap(8).items_start().text_size(12).text_color(t.dim)
+          .child(svg("mods/workspace-chrome/clock.svg").size(14).flex_none().mt(1)).child(div().flex_1().child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not."))),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
       .when(collapsed, (el) =>
@@ -520,7 +522,8 @@ export default class Agents extends View {
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
                 .on_click(toggleSidebar)
-                .child("»"),
+                .tooltip("Expand sidebar")
+                .child(svg("mods/workspace-chrome/panel-left.svg").size(14)),
             ),
         ),
       );
