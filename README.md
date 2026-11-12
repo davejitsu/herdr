@@ -4,13 +4,18 @@ A saved custom Herdr layout with spaces, nested worktrees, and tab rows in the s
 
 ## Features
 
-- Fold space and machine groups.
-- Close a parent-folder group with the × on its header. Click it twice: the first click asks, the second closes all spaces in the group.
+- Fold space and machine groups. Click a space to select it. Click the chevron on its row to show or hide its tabs.
+- Fold a parent-folder group in one list, and the same group folds in the other list. The fold state stays after a restart.
+- Close a parent-folder group with the × on its header. Click it twice: the first click asks, the second closes all spaces in the group. The question shows the number of agents that work or wait in the group, and the number of changed files.
+- Right-click a parent-folder group header to open its menu: **New terminal here**, **Fold other groups**, **Copy path**, and **Close group**. Use the Up and Down keys to select an item, and Enter to do it.
+- In compact mode, a thin line separates the parent-folder groups. A folded group shows as one cell with its number of spaces.
+- In compact mode, the Agents list shows the colored avatar of each agent's space, with a status dot.
+- A drag can move a space only in its own group. On a different group, the pointer shows that the move is not possible.
 - Show blocked/done badges on folded groups. Blocked status takes priority.
 - Show colored initial avatars in compact mode.
 - Show full names, live folders, and remote machine names in compact tooltips.
 - Open space menus with a right-click in expanded or compact mode.
-- Show Git branches and ahead/behind counts.
+- Show Git branches and ahead/behind counts. A tooltip on ↑ and ↓ shows the number of commits that you did not push or pull.
 - Show the number of changed files (`~3`) after the branch.
 - Show the number of spaces on a folded parent-folder group.
 - Show the + and × on a group header only when the pointer is on it. The × question stops after 3 seconds or when the pointer leaves the header.

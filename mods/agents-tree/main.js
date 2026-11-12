@@ -61,6 +61,10 @@ const SORTS = [
   { id: "folder", label: "Grouped by folder", icon: "folder" },
 ];
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
+// The same avatar colors as the spaces-tree mod.
+const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
+// Folded folder groups: shared with the spaces-tree mod, so both lists fold the same groups.
+const foldedDirs = () => new Set(shared("dirs.folded") ?? []);
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
 
@@ -81,7 +85,9 @@ function icon(p, size, color) {
 export default class Agents extends View {
   init(_props, cx) {
     if (props()?.sortMenu) return;
-    this.folded = new Set();
+    this.folded = new Set(); // agents whose sub-agents are hidden
+    // Folded headers (Pinned, priority sections, spaces), kept across restarts.
+    this.foldedGroups = new Set(JSON.parse(localStorage.getItem("groups.folded") ?? "[]"));
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
@@ -125,6 +131,25 @@ export default class Agents extends View {
     this.pendingPins = pending;
     if (pending.length) localStorage.setItem("pins", JSON.stringify(pending));
     else localStorage.removeItem("pins");
+  }
+
+  // A folder group's fold is shared with spaces-tree; the other headers are this list's own.
+  groupFolded(g, dirs) {
+    return g.key ? dirs.has(g.key) : this.foldedGroups.has(g.id);
+  }
+
+  toggleGroup(g) {
+    if (g.key) {
+      const dirs = foldedDirs();
+      dirs.has(g.key) ? dirs.delete(g.key) : dirs.add(g.key);
+      setShared("dirs.folded", [...dirs]);
+      return;
+    }
+    this.foldedGroups.has(g.id) ? this.foldedGroups.delete(g.id) : this.foldedGroups.add(g.id);
+    // Forget folded spaces that are gone.
+    const live = new Set(spaces().map((s) => `sp-${s.id}`));
+    for (const id of this.foldedGroups) if (id.startsWith("sp-") && !live.has(id)) this.foldedGroups.delete(id);
+    localStorage.setItem("groups.folded", JSON.stringify([...this.foldedGroups]));
   }
 
   since(a) {
@@ -182,7 +207,7 @@ export default class Agents extends View {
         const name = pub.labels?.[key] ?? path.split(/[\\/]+/).filter(Boolean).pop() ?? path;
         label = machine ? `${name} · ${machine}` : name;
       }
-      return { id: `dir-${key ?? "none"}`, label, status: null, members: byKey.get(key) };
+      return { id: `dir-${key ?? "none"}`, key, label, status: null, members: byKey.get(key) };
     });
   }
 
@@ -319,23 +344,34 @@ export default class Agents extends View {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
+    const colors = shared("space.colors") ?? {};
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
       const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+      // The rail: the avatar of the agent's space, with its status at the corner.
       if (collapsed) {
+        const color = colors[a.space] ?? "ansi6";
+        const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+        const tip = [`${i + 1}. ${a.space_name || "?"}${more ? ` · ${more}` : ""}`, a.program?.name, machine && `Machine: ${machine}`].filter(Boolean).join("\n");
         return h_flex()
           .id(`ag-${a.address}`)
           .h(26)
-          .px(8)
           .flex_none()
+          .justify_center()
           .items_center()
-          .gap(4)
+          .rounded(6)
+          .when(a.focused, (el) => el.bg(t.selected))
           .hover((s) => s.bg(t.hover))
+          .tooltip(tip)
           .on_click(() => run("pane.focus", { pane: a.pane }))
-          .child(div().flex_1().min_w(0).whitespace_nowrap().text_right().text_color(t.muted).child(String(i + 1)))
-          .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
+          .child(div().relative().flex_none()
+            .child(h_flex().size(18).rounded(5).bg(fill).items_center().justify_center()
+              .text_size(10.5).font_bold().text_color("#ffffff").child([...(a.space_name || "?")][0].toUpperCase()))
+            .child(div().absolute().right(-4).bottom(-3).child(a.status === "working"
+              ? svg("mods/workspace-chrome/spinner.svg").size(10).text_color(t.working).spin(900)
+              : div().size(8).rounded(4).border_1().border_color(t.chrome).bg(a.status === "idle" ? t.dim : (t[a.status] ?? t.dim)))));
       }
       const when = this.since(a);
       const idle = a.status === "idle" && !a.focused;
@@ -406,8 +442,9 @@ export default class Agents extends View {
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
+    const dirs = foldedDirs();
     const header = (g) => {
-      const open = !this.folded.has(g.id);
+      const open = !this.groupFolded(g, dirs);
       const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
       return h_flex()
         .id(g.id)
@@ -422,7 +459,7 @@ export default class Agents extends View {
         .cursor_pointer()
         .hover((s) => s.text_color(t.foreground))
         .on_click((_e, cx) => {
-          open ? this.folded.add(g.id) : this.folded.delete(g.id);
+          this.toggleGroup(g);
           cx.notify();
         })
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
@@ -434,7 +471,7 @@ export default class Agents extends View {
     };
     const rows = collapsed
       ? list.flatMap(withKids)
-      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+      : groups.flatMap((g) => [header(g), ...(this.groupFolded(g, dirs) ? [] : g.members.flatMap(withKids))]);
 
     return v_flex()
       .size_full()

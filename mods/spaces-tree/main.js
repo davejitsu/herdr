@@ -69,12 +69,22 @@ function attentionBadge(t, status, id) {
     .tooltip(status === "blocked" ? "An agent needs input" : "An agent finished");
 }
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// Folded folder groups are a shared value, so the agents-tree list folds the
+// same groups. The first run moves the old local value there.
+const foldedDirs = () => new Set(shared("dirs.folded") ?? []);
+function setDirsFolded(keys) {
+  setShared("dirs.folded", [...keys]);
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
     // Opened as the popup of a group header's right-click: only that menu.
     if (props()?.group) {
       this.handle = cx.focus_handle();
       this.handle.focus();
+      this.sel = 0; // the menu item that Enter activates
       return;
     }
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
@@ -96,7 +106,7 @@ export default class Spaces extends View {
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
-    this.foldedDirs = new Set(JSON.parse(localStorage.getItem("dirs.folded") ?? "[]"));
+    if (shared("dirs.folded") == null) setDirsFolded(JSON.parse(localStorage.getItem("dirs.folded") ?? "[]"));
     this.foldedSpaces = new Set(JSON.parse(localStorage.getItem("spaces.folded") ?? "[]"));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
@@ -357,38 +367,65 @@ export default class Spaces extends View {
     return out;
   }
 
-  dirRow(key, rows, t, label) {
+  // What closing a group stops: its agents at work or waiting, and its changed
+  // files (counted once for each checkout, as two spaces can share one).
+  risk(ids, rows) {
+    const mine = new Set(ids);
+    const list = agents().filter((a) => mine.has(a.space));
+    const working = list.filter((a) => a.status === "working").length;
+    const waiting = list.filter((a) => a.status === "blocked").length;
+    const tops = new Map();
+    for (const r of rows) if (mine.has(r.w.id) && r.g) tops.set(r.g.top, r.g.changes);
+    const changes = [...tops.values()].reduce((a, b) => a + b, 0);
+    return [
+      working && `${plural(working, "agent")} working`,
+      waiting && `${plural(waiting, "agent")} waiting`,
+      changes && plural(changes, "changed file"),
+    ].filter(Boolean).join(" · ");
+  }
+
+  toggleDir(key, cx) {
+    const folded = foldedDirs();
+    folded.has(key) ? folded.delete(key) : folded.add(key);
+    setDirsFolded(folded);
+    cx.notify();
+  }
+
+  dirRow(key, rows, t, label, folded, order) {
     const [machine, path] = JSON.parse(key);
-    const folded = this.foldedDirs.has(key);
     const members = rows.filter((r) => r.group === key);
+    const ids = members.map((r) => r.w.id);
     const st = members.map((r) => r.w.status);
     const attention = st.includes("blocked") ? "blocked" : st.includes("done") ? "done" : null;
+    const asking = this.closing === key;
+    const risk = this.risk(ids, rows);
     // The + and × show only under the pointer, or while the × asks.
-    const hot = this.hoverHead === key || this.closing === key;
+    const hot = this.hoverHead === key || asking;
     return h_flex().id(`dir-${key}`).h(24).flex_none().px(8).gap(6).items_center().rounded(6).text_size(11).text_color(t.dim)
       .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(path)
       .on_hover((on, cx) => this.hoverHeader(key, on, cx))
       .on_mouse_down("right", () => openOverlay({
-        mod: "spaces-tree", kind: "popup", width: 220, height: 50,
-        props: { group: { ids: rows.filter((r) => r.group === key).map((r) => r.w.id) } },
+        mod: "spaces-tree", kind: "popup", width: 240, height: 200,
+        props: { group: { key, path, machine, ids, risk, keys: order.filter((k) => JSON.parse(k)[0] === machine) } },
       }))
       .on_click((_e, cx) => {
         this.closing = null;
-        folded ? this.foldedDirs.delete(key) : this.foldedDirs.add(key);
-        localStorage.setItem("dirs.folded", JSON.stringify([...this.foldedDirs]));
-        cx.notify();
+        this.toggleDir(key, cx);
       })
       .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none())
-      .child(div().min_w(0).truncate().child(label ?? leaf(path)))
-      .when(folded, (el) => el.child(div().flex_none().opacity(0.7).child(String(members.length))))
-      .child(div().flex_1())
+      // While the × asks, the name gives way to what the close stops.
+      .when(asking, (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.blocked)
+        .child(`Close ${plural(ids.length, "space")}?${risk ? ` ${risk}` : ""}`)))
+      .when(!asking, (el) => el.child(div().min_w(0).truncate().child(label ?? leaf(path))))
+      .when(folded && !asking, (el) => el.child(div().flex_none().opacity(0.7).child(String(members.length))))
+      .when(!asking, (el) => el.child(div().flex_1()))
       .when(folded && Boolean(attention), (el) => el.child(attentionBadge(t, attention, `dir-attention-${key}`)))
       .when(hot, (el) => el
-        .child(div().id(`dir-new-${key}`).flex_none().px(4).rounded(4).tooltip(`New terminal in ${path}`)
+        .when(!asking, (el) => el.child(div().id(`dir-new-${key}`).flex_none().px(4).rounded(4).tooltip(`New terminal in ${path}`)
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { folder: path, machine: machine ?? "" }); })
-          .child("+"))
-        .child(this.closeGroup(key, rows, t)));
+          .child("+")))
+        .child(this.closeGroup(key, ids, t)));
   }
 
   // The folder groups, for the agents-tree mod: it groups agents the same way.
@@ -414,12 +451,12 @@ export default class Spaces extends View {
 
   // The × on a group's header. The first click asks; the second closes every
   // space in the group (worktrees too). Folding the group cancels the question.
-  closeGroup(key, rows, t) {
-    const ids = rows.filter((r) => r.group === key).map((r) => r.w.id);
+  // The button has one width in both states, so the header does not move.
+  closeGroup(key, ids, t) {
     const asking = this.closing === key;
-    return div().id(`dir-close-${key}`).flex_none().px(4).rounded(4)
+    return div().id(`dir-close-${key}`).flex_none().w(38).flex().justify_center().rounded(4)
       .text_color(asking ? t.blocked : t.dim)
-      .tooltip(asking ? `Click again to close ${ids.length} space${ids.length === 1 ? "" : "s"}` : `Close group (${ids.length} space${ids.length === 1 ? "" : "s"})`)
+      .tooltip(asking ? `Click again to close ${plural(ids.length, "space")}` : `Close group (${plural(ids.length, "space")})`)
       .hover((s) => s.bg(t.hover).text_color(asking ? t.blocked : t.foreground))
       .on_click((_e, cx) => {
         cx.stop_propagation();
@@ -438,7 +475,7 @@ export default class Spaces extends View {
         }
         cx.notify();
       })
-      .child(asking ? "Close?" : "×");
+      .child(asking ? "Close" : "×");
   }
 
   // The rows, under a header per machine once one isn't this computer.
@@ -448,18 +485,26 @@ export default class Spaces extends View {
     for (const agent of agents()) if (!tabAgents.has(agent.tab) && agent.program?.icon) tabAgents.set(agent.tab, agent.program);
     const ps = collapsed ? panes() : [];
     const heads = new Set();
-    rows.forEach((r, i) => { if (r.group && rows[i - 1]?.group !== r.group) heads.add(r.w.id); });
+    const firsts = new Set(); // the first row of each machine's list
+    rows.forEach((r, i) => {
+      if (r.group && rows[i - 1]?.group !== r.group) heads.add(r.w.id);
+      if (i === 0 || (rows[i - 1].w.machine ?? null) !== (r.w.machine ?? null)) firsts.add(r.w.id);
+    });
     const order = [...new Set(rows.map((r) => r.group).filter(Boolean))];
     const names = dirLabels(order);
+    const folds = foldedDirs();
     this.publish(rows, order, names);
     const body = (r) => collapsed ? [this.compact(r, t, place(r.w, ps))] : [
       this.row(r, t),
       ...(this.foldedSpaces.has(r.w.id) ? [] : r.w.tabs.map(tab => this.tabRow(r, tab, t, tabAgents.get(tab.id)))),
     ];
     const draw = (r) => {
-      if (collapsed) return body(r);
-      const head = heads.has(r.w.id) ? [this.dirRow(r.group, rows, t, names[r.group])] : [];
-      return r.group && this.foldedDirs.has(r.group) ? head : [...head, ...body(r)];
+      const folded = Boolean(r.group) && folds.has(r.group);
+      let head = [];
+      if (heads.has(r.w.id)) head = collapsed
+        ? this.railGroup(r.group, rows, t, names[r.group], folded, firsts.has(r.w.id))
+        : [this.dirRow(r.group, rows, t, names[r.group], folded, order)];
+      return folded ? head : [...head, ...body(r)];
     };
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
@@ -522,6 +567,25 @@ export default class Spaces extends View {
     });
   }
 
+  // A folder group in the rail: a thin line above it (not above a machine's
+  // first group), and when it is folded, one cell with its space count.
+  railGroup(key, rows, t, label, folded, first) {
+    const line = railCell(div().w(18).h(1).my(3).bg(t.dim).opacity(0.4));
+    if (!folded) return first ? [] : [line];
+    const [, path] = JSON.parse(key);
+    const st = rows.filter((r) => r.group === key).map((r) => r.w.status);
+    const n = st.length;
+    const attention = st.includes("blocked") ? "blocked" : st.includes("done") ? "done" : null;
+    const cell = railCell(h_flex().id(`dir-${key}`).relative().w(RAIL_CELL).h(22).rounded(6).justify_center().items_center()
+      .text_size(10.5).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(`${label ?? leaf(path)} (${plural(n, "space")}, folded)\nClick to unfold`)
+      .on_click((_e, cx) => this.toggleDir(key, cx))
+      .child(h_flex().size(18).rounded(5).border_1().border_color(t.dim).items_center().justify_center().child(String(n)))
+      .when(Boolean(attention), (el) => el.child(attentionBadge(t, attention, `dir-attention-${key}`)
+        .absolute().right(2).bottom(2).border_1().border_color(t.chrome))));
+    return first ? [cell] : [line, cell];
+  }
+
   // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
   // branch goes when the name already says it (a worktree is named after its branch),
   // and master/main go: nearly every space is on one.
@@ -542,8 +606,10 @@ export default class Spaces extends View {
       .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
       .when(g.changes > 0, (el) => el.child(div().id(`changes-${id}`).flex_none().text_color(t.ansi3)
         .tooltip(`${g.changes} changed file${g.changes === 1 ? "" : "s"}`).child(`~${g.changes}`)))
-      .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
-      .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
+      .when(g.ahead > 0, (el) => el.child(div().id(`ahead-${id}`).flex_none().text_color(t.ansi2)
+        .tooltip(`${plural(g.ahead, "commit")} not pushed`).child(`\u2191${g.ahead}`)))
+      .when(g.behind > 0, (el) => el.child(div().id(`behind-${id}`).flex_none().text_color(t.ansi1)
+        .tooltip(`${plural(g.behind, "commit")} not pulled`).child(`\u2193${g.behind}`)));
   }
 
   row({ w, i, g, tree, group }, t) {
@@ -563,6 +629,9 @@ export default class Spaces extends View {
       .rounded(8)
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      .cursor_pointer()
+      // A drag can only move a space in its own group and machine.
+      .when(this.pressed !== null && this.denied === w.id, (el) => el.cursor_not_allowed())
       .when(this.pressed === w.id && this.over !== w.id, (el) => el.opacity(0.5))
       .when(this.pressed !== null && this.over === w.id && this.pressed !== w.id, (el) => el.child(
         div().absolute().left(0).right(0).h(2).bg(t.accent)
@@ -577,8 +646,10 @@ export default class Spaces extends View {
       .on_mouse_move((_e, cx) => {
         const source = spaces().find(s => s.id === this.pressed);
         const over = source && (source.machine ?? null) === (w.machine ?? null) && this.pressedGroup === (group ?? null) ? w.id : null;
-        if (this.pressed !== null && this.over !== over) {
+        const denied = source && !over ? w.id : null;
+        if (this.pressed !== null && (this.over !== over || this.denied !== denied)) {
           this.over = over;
+          this.denied = denied;
           cx.notify();
         }
       })
@@ -587,6 +658,7 @@ export default class Spaces extends View {
         const over = this.over;
         this.pressed = null;
         this.over = null;
+        this.denied = null;
         if (from !== null && over === w.id && from !== w.id) {
           const index = spaces().findIndex(s => s.id === w.id);
           if (index !== -1) run("space.move", { id: from, index: index + 1 });
@@ -670,23 +742,43 @@ export default class Spaces extends View {
           .absolute().right(2).bottom(2).border_1().border_color(w.active ? t.selected : t.chrome))));
   }
 
-  // The right-click menu of a group header: one item, the same close as the ×.
+  // The right-click menu of a group header. Up and Down select an item, Enter
+  // does it, Escape closes the menu.
   groupMenu(t) {
-    const { ids } = props().group;
-    const close = () => {
-      closeOverlay(props().overlay);
-      for (const id of ids) run("space.close", { id });
-    };
+    const { key, path, machine, ids, risk, keys } = props().group;
+    const done = () => closeOverlay(props().overlay);
+    const items = [
+      { id: "new", icon: "terminal", label: "New terminal here", act: () => run("space.new", { folder: path, machine: machine ?? "" }) },
+      { id: "fold-others", icon: "minus", label: "Fold other groups", act: () => {
+        const folded = foldedDirs();
+        for (const k of keys) if (k !== key) folded.add(k);
+        folded.delete(key);
+        setDirsFolded(folded);
+      } },
+      { id: "copy", icon: "file-text", label: "Copy path", act: (cx) => cx.write_to_clipboard(path) },
+      { id: "close", icon: "x", label: `Close group (${plural(ids.length, "space")})`, note: risk, danger: true,
+        act: () => { for (const id of ids) run("space.close", { id }); } },
+    ];
+    const pick = (item, cx) => { done(); item.act(cx); };
     return v_flex().id("group-menu").track_focus(this.handle).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
-      .on_key_down((e) => {
-        if (e.key === "enter") close();
-        else if (e.key === "escape") closeOverlay(props().overlay);
+      .on_key_down((e, cx) => {
+        if (e.key === "enter") pick(items[this.sel], cx);
+        else if (e.key === "escape") done();
+        else if (e.key === "down" || e.key === "up") {
+          this.sel = (this.sel + (e.key === "down" ? 1 : items.length - 1)) % items.length;
+          cx.notify();
+        }
       })
-      .child(h_flex().id("group-close").h(31).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
-        .bg(t.selected).hover((s) => s.bg(t.hover))
-        .on_click(close)
-        .child(svg("mods/workspace-chrome/x.svg").size(14).flex_none().text_color(t.muted))
-        .child(div().flex_1().child(`Close group (${ids.length} space${ids.length === 1 ? "" : "s"})`)));
+      .children(items.map((item, i) => h_flex().id(`group-${item.id}`).h(item.note ? 40 : 31).px(8).gap(9).rounded(7).items_center()
+        .text_color(item.danger ? t.blocked : t.foreground)
+        .when(i === this.sel, (el) => el.bg(t.selected))
+        .hover((s) => s.bg(t.hover))
+        .on_hover((on, cx) => { if (on && this.sel !== i) { this.sel = i; cx.notify(); } })
+        .on_click((_e, cx) => pick(item, cx))
+        .child(svg(`mods/workspace-chrome/${item.icon}.svg`).size(14).flex_none().text_color(item.danger ? t.blocked : t.muted))
+        .child(v_flex().flex_1().min_w(0)
+          .child(div().truncate().child(item.label))
+          .when(Boolean(item.note), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(item.note))))));
   }
 
   render() {
@@ -712,7 +804,7 @@ export default class Spaces extends View {
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
-        .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
+        .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.denied = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
   }
 }
