@@ -5,7 +5,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, agents, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, agents, run, openOverlay, closeOverlay, props, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -34,6 +34,19 @@ const parent = (path) => path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]*$/, ""
 // The thin line down a group's left edge, under its header's chevron.
 const guide = (t) => div().absolute().left(13).top(0).bottom(0).w(1).bg(t.dim).opacity(0.3);
 const leaf =(path) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+// A group header's name: its folder's last part, with more parent parts while
+// another group on the same machine would read the same ("work/repos", "old/repos").
+function dirLabels(keys) {
+  const parts = keys.map((k) => { const [on, path] = JSON.parse(k); return { on, path, p: path.split(/[\\/]+/).filter(Boolean) }; });
+  const tail = (p, n) => p.slice(-n).join("/");
+  const out = {};
+  parts.forEach((a, i) => {
+    let n = 1;
+    while (n < a.p.length && parts.some((b, j) => j !== i && b.on === a.on && tail(b.p, n) === tail(a.p, n))) n++;
+    out[keys[i]] = tail(a.p, n) || a.path;
+  });
+  return out;
+}
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -58,6 +71,12 @@ function attentionBadge(t, status, id) {
 
 export default class Spaces extends View {
   init(_props, cx) {
+    // Opened as the popup of a group header's right-click: only that menu.
+    if (props()?.group) {
+      this.handle = cx.focus_handle();
+      this.handle.focus();
+      return;
+    }
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
@@ -72,6 +91,7 @@ export default class Spaces extends View {
     this.born = {};
     this.pressed = null;
     this.over = null;
+    this.closing = null; // a group header waiting for its second click to close
     this.machines = [];
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
@@ -226,9 +246,11 @@ export default class Spaces extends View {
       const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
       const repo = common.stdout.trim();
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, top: top.stdout.trim(), branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
+      const info = { name, top: top.stdout.trim(), branch: null, ahead: 0, behind: 0, changes: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
       for (const line of r.stdout.split("\n")) {
-        if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
+        // Each line that is not a "#" header is one changed or untracked file.
+        if (line && !line.startsWith("#")) info.changes++;
+        else if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
           const [a, b] = line.slice(12).split(" ");
           info.ahead = Math.abs(parseInt(a, 10)) || 0;
@@ -335,25 +357,88 @@ export default class Spaces extends View {
     return out;
   }
 
-  dirRow(key, rows, t) {
+  dirRow(key, rows, t, label) {
     const [machine, path] = JSON.parse(key);
     const folded = this.foldedDirs.has(key);
-    const st = rows.filter((r) => r.group === key).map((r) => r.w.status);
+    const members = rows.filter((r) => r.group === key);
+    const st = members.map((r) => r.w.status);
     const attention = st.includes("blocked") ? "blocked" : st.includes("done") ? "done" : null;
+    // The + and × show only under the pointer, or while the × asks.
+    const hot = this.hoverHead === key || this.closing === key;
     return h_flex().id(`dir-${key}`).h(24).flex_none().px(8).gap(6).items_center().rounded(6).text_size(11).text_color(t.dim)
       .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(path)
+      .on_hover((on, cx) => this.hoverHeader(key, on, cx))
+      .on_mouse_down("right", () => openOverlay({
+        mod: "spaces-tree", kind: "popup", width: 220, height: 50,
+        props: { group: { ids: rows.filter((r) => r.group === key).map((r) => r.w.id) } },
+      }))
       .on_click((_e, cx) => {
+        this.closing = null;
         folded ? this.foldedDirs.delete(key) : this.foldedDirs.add(key);
         localStorage.setItem("dirs.folded", JSON.stringify([...this.foldedDirs]));
         cx.notify();
       })
       .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none())
-      .child(div().flex_1().min_w(0).truncate().child(leaf(path)))
+      .child(div().min_w(0).truncate().child(label ?? leaf(path)))
+      .when(folded, (el) => el.child(div().flex_none().opacity(0.7).child(String(members.length))))
+      .child(div().flex_1())
       .when(folded && Boolean(attention), (el) => el.child(attentionBadge(t, attention, `dir-attention-${key}`)))
-      .child(div().id(`dir-new-${key}`).flex_none().px(4).rounded(4).tooltip(`New terminal in ${path}`)
-        .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { folder: path, machine: machine ?? "" }); })
-        .child("+"));
+      .when(hot, (el) => el
+        .child(div().id(`dir-new-${key}`).flex_none().px(4).rounded(4).tooltip(`New terminal in ${path}`)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { folder: path, machine: machine ?? "" }); })
+          .child("+"))
+        .child(this.closeGroup(key, rows, t)));
+  }
+
+  // The folder groups, for the agents-tree mod: it groups agents the same way.
+  // { groups: space id -> group key, order: group keys top to bottom, labels: group key -> name }
+  publish(rows, order, labels) {
+    const groups = {};
+    for (const r of rows) if (r.group) groups[r.w.id] = r.group;
+    const next = JSON.stringify({ groups, order, labels });
+    if (next === this.published) return;
+    this.published = next;
+    setShared("spaces.groups", JSON.parse(next));
+  }
+
+  // The pointer on a header shows its buttons. Leaving a group header cancels its × question.
+  hoverHeader(key, on, cx) {
+    if (on) this.hoverHead = key;
+    else if (this.hoverHead === key) {
+      this.hoverHead = null;
+      if (this.closing === key) this.closing = null;
+    }
+    cx.notify();
+  }
+
+  // The × on a group's header. The first click asks; the second closes every
+  // space in the group (worktrees too). Folding the group cancels the question.
+  closeGroup(key, rows, t) {
+    const ids = rows.filter((r) => r.group === key).map((r) => r.w.id);
+    const asking = this.closing === key;
+    return div().id(`dir-close-${key}`).flex_none().px(4).rounded(4)
+      .text_color(asking ? t.blocked : t.dim)
+      .tooltip(asking ? `Click again to close ${ids.length} space${ids.length === 1 ? "" : "s"}` : `Close group (${ids.length} space${ids.length === 1 ? "" : "s"})`)
+      .hover((s) => s.bg(t.hover).text_color(asking ? t.blocked : t.foreground))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        if (!asking) {
+          this.closing = key;
+          // The question expires: a later single click must not close the group.
+          const ask = this.closingAsk = {};
+          cx.timer.after(3000, (cx) => {
+            if (this.closingAsk !== ask || this.closing !== key) return;
+            this.closing = null;
+            cx.notify();
+          });
+        } else {
+          this.closing = null;
+          for (const id of ids) run("space.close", { id });
+        }
+        cx.notify();
+      })
+      .child(asking ? "Close?" : "×");
   }
 
   // The rows, under a header per machine once one isn't this computer.
@@ -364,13 +449,16 @@ export default class Spaces extends View {
     const ps = collapsed ? panes() : [];
     const heads = new Set();
     rows.forEach((r, i) => { if (r.group && rows[i - 1]?.group !== r.group) heads.add(r.w.id); });
+    const order = [...new Set(rows.map((r) => r.group).filter(Boolean))];
+    const names = dirLabels(order);
+    this.publish(rows, order, names);
     const body = (r) => collapsed ? [this.compact(r, t, place(r.w, ps))] : [
       this.row(r, t),
       ...(this.foldedSpaces.has(r.w.id) ? [] : r.w.tabs.map(tab => this.tabRow(r, tab, t, tabAgents.get(tab.id)))),
     ];
     const draw = (r) => {
       if (collapsed) return body(r);
-      const head = heads.has(r.w.id) ? [this.dirRow(r.group, rows, t)] : [];
+      const head = heads.has(r.w.id) ? [this.dirRow(r.group, rows, t, names[r.group])] : [];
       return r.group && this.foldedDirs.has(r.group) ? head : [...head, ...body(r)];
     };
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
@@ -396,6 +484,7 @@ export default class Spaces extends View {
       const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
         .when(collapsed, el => el.mt(4).w(RAIL_CELL).justify_center().rounded(6).tooltip(m ? `${m} · ${connected ? "connected" : (machine?.state ?? "asleep").replace(/_/g, " ")}` : "This computer"))
         .cursor_pointer().hover(s => s.bg(t.hover))
+        .on_hover((on, cx) => this.hoverHeader(`machine:${m ?? ""}`, on, cx))
         .on_click((_e, cx) => {
           folded ? this.folded.delete(m) : this.folded.add(m);
           localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
@@ -415,7 +504,7 @@ export default class Spaces extends View {
               .tooltip(repair?.error || "This machine was rebuilt or replaced. Click to connect to the new one.")
               .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
               .child(repair?.busy ? "Connecting…" : "Connect"))))
-          .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
+          .when(connected && this.hoverHead === `machine:${m ?? ""}`, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
           .when(folded && Boolean(attention), el => el.child(attentionBadge(t, attention, `machine-attention-${m ?? "local"}`)))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
@@ -436,7 +525,7 @@ export default class Spaces extends View {
   // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
   // branch goes when the name already says it (a worktree is named after its branch),
   // and master/main go: nearly every space is on one.
-  gitTail(g, tree, name, t) {
+  gitTail(g, tree, name, id, t) {
     const raw = g.branch ?? "detached";
     const same = (a) => a.toLowerCase() === name.toLowerCase();
     const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
@@ -451,6 +540,8 @@ export default class Spaces extends View {
       .text_size(11.5)
       .text_color(t.dim)
       .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
+      .when(g.changes > 0, (el) => el.child(div().id(`changes-${id}`).flex_none().text_color(t.ansi3)
+        .tooltip(`${g.changes} changed file${g.changes === 1 ? "" : "s"}`).child(`~${g.changes}`)))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
@@ -510,7 +601,7 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+          .child(g ? this.gitTail(g, tree, w.name, w.id, t) : div().flex_1())
           .when(this.foldedSpaces.has(w.id) && (w.status === "blocked" || w.status === "done"),
             el => el.child(attentionBadge(t, w.status, `space-attention-${w.id}`)))
           .child(div().id(`space-fold-${w.id}`).size(20).flex_none().flex().items_center().justify_center()
@@ -579,8 +670,28 @@ export default class Spaces extends View {
           .absolute().right(2).bottom(2).border_1().border_color(w.active ? t.selected : t.chrome))));
   }
 
+  // The right-click menu of a group header: one item, the same close as the ×.
+  groupMenu(t) {
+    const { ids } = props().group;
+    const close = () => {
+      closeOverlay(props().overlay);
+      for (const id of ids) run("space.close", { id });
+    };
+    return v_flex().id("group-menu").track_focus(this.handle).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
+      .on_key_down((e) => {
+        if (e.key === "enter") close();
+        else if (e.key === "escape") closeOverlay(props().overlay);
+      })
+      .child(h_flex().id("group-close").h(31).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
+        .bg(t.selected).hover((s) => s.bg(t.hover))
+        .on_click(close)
+        .child(svg("mods/workspace-chrome/x.svg").size(14).flex_none().text_color(t.muted))
+        .child(div().flex_1().child(`Close group (${ids.length} space${ids.length === 1 ? "" : "s"})`)));
+  }
+
   render() {
     const t = theme();
+    if (props()?.group) return this.groupMenu(t);
     const collapsed = narrow();
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
     const sp = spaces();
