@@ -1,5 +1,5 @@
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
-// grouped by machine when more than one is known. After a space's name, the repo
+// grouped by parent folder, and by machine when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
 // switch, right-click for its menu, drag to reorder.
 
@@ -30,6 +30,10 @@ const RAIL_CELL = 32;
 const railCell = (el) => h_flex().flex_none().justify_center().child(el);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
+const parent = (path) => path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]*$/, "") || "/";
+// The thin line down a group's left edge, under its header's chevron.
+const guide = (t) => div().absolute().left(13).top(0).bottom(0).w(1).bg(t.dim).opacity(0.3);
+const leaf =(path) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -72,6 +76,7 @@ export default class Spaces extends View {
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
+    this.foldedDirs = new Set(JSON.parse(localStorage.getItem("dirs.folded") ?? "[]"));
     this.foldedSpaces = new Set(JSON.parse(localStorage.getItem("spaces.folded") ?? "[]"));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
@@ -221,7 +226,7 @@ export default class Spaces extends View {
       const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
       const repo = common.stdout.trim();
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
+      const info = { name, top: top.stdout.trim(), branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
       for (const line of r.stdout.split("\n")) {
         if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
@@ -271,16 +276,17 @@ export default class Spaces extends View {
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
     const nested = (r) => r.g?.linked && mains.has(r.g.repo);
-    const out = [];
+    const flat = [];
     const placed = new Set(); // repos whose worktrees are listed (under the first of its spaces)
     for (const r of list) {
       if (nested(r)) continue;
-      out.push({ ...r, tree: null });
+      flat.push({ ...r, tree: null });
       if (!r.g || r.g.linked || placed.has(r.g.repo)) continue;
       placed.add(r.g.repo);
       const kids = list.filter((k) => nested(k) && k.g.repo === r.g.repo);
-      kids.forEach((k, n) => out.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
+      kids.forEach((k, n) => flat.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
     }
+    const out = this.byParent(flat, ps);
     // Simulate the batch so later indexes include earlier moves. An attempted
     // write can lose a sync conflict: allow the echo to settle before retrying.
     const order = sp.map(w => w.id);
@@ -303,16 +309,70 @@ export default class Spaces extends View {
     return out.filter(r => this.shown.has(r.w.id));
   }
 
+  // Rows whose checkouts share a parent folder sit together (a worktree stays
+  // with its main checkout). Every space with a known folder is in a group.
+  byParent(flat, ps) {
+    const units = [];
+    for (const r of flat) {
+      if (r.tree) { units[units.length - 1].push(r); continue; }
+      const path = r.g?.top || place(r.w, ps);
+      r.dir = path ? JSON.stringify([r.w.machine ?? null, parent(path)]) : null;
+      units.push([r]);
+    }
+    const done = new Set();
+    const out = [];
+    for (const u of units) {
+      const d = u[0].dir;
+      if (!d) { out.push(...u); continue; }
+      if (done.has(d)) continue;
+      done.add(d);
+      for (const v of units) if (v[0].dir === d) out.push(...v);
+    }
+    for (let i = 0; i < out.length; i++) {
+      const r = out[i];
+      r.group = r.tree ? out[i - 1].group : r.dir;
+    }
+    return out;
+  }
+
+  dirRow(key, rows, t) {
+    const [machine, path] = JSON.parse(key);
+    const folded = this.foldedDirs.has(key);
+    const st = rows.filter((r) => r.group === key).map((r) => r.w.status);
+    const attention = st.includes("blocked") ? "blocked" : st.includes("done") ? "done" : null;
+    return h_flex().id(`dir-${key}`).h(24).flex_none().px(8).gap(6).items_center().rounded(6).text_size(11).text_color(t.dim)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).tooltip(path)
+      .on_click((_e, cx) => {
+        folded ? this.foldedDirs.delete(key) : this.foldedDirs.add(key);
+        localStorage.setItem("dirs.folded", JSON.stringify([...this.foldedDirs]));
+        cx.notify();
+      })
+      .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none())
+      .child(div().flex_1().min_w(0).truncate().child(leaf(path)))
+      .when(folded && Boolean(attention), (el) => el.child(attentionBadge(t, attention, `dir-attention-${key}`)))
+      .child(div().id(`dir-new-${key}`).flex_none().px(4).rounded(4).tooltip(`New terminal in ${path}`)
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { folder: path, machine: machine ?? "" }); })
+        .child("+"));
+  }
+
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
     const tabAgents = new Map();
     for (const agent of agents()) if (!tabAgents.has(agent.tab) && agent.program?.icon) tabAgents.set(agent.tab, agent.program);
     const ps = collapsed ? panes() : [];
-    const draw = (r) => collapsed ? [this.compact(r, t, place(r.w, ps))] : [
+    const heads = new Set();
+    rows.forEach((r, i) => { if (r.group && rows[i - 1]?.group !== r.group) heads.add(r.w.id); });
+    const body = (r) => collapsed ? [this.compact(r, t, place(r.w, ps))] : [
       this.row(r, t),
       ...(this.foldedSpaces.has(r.w.id) ? [] : r.w.tabs.map(tab => this.tabRow(r, tab, t, tabAgents.get(tab.id)))),
     ];
+    const draw = (r) => {
+      if (collapsed) return body(r);
+      const head = heads.has(r.w.id) ? [this.dirRow(r.group, rows, t)] : [];
+      return r.group && this.foldedDirs.has(r.group) ? head : [...head, ...body(r)];
+    };
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
@@ -395,7 +455,7 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree }, t) {
+  row({ w, i, g, tree, group }, t) {
     const on = w.active;
     const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
@@ -405,6 +465,7 @@ export default class Spaces extends View {
       .relative()
       .id(`space-${w.id}`)
       .px(8)
+      .when(Boolean(group), (el) => el.pl(20).child(guide(t)))
       .h(rowHeight({ tree }))
       .flex_none()
       .justify_center()
@@ -419,11 +480,12 @@ export default class Spaces extends View {
       ))
       .on_mouse_down("left", () => {
         this.pressed = w.id;
+        this.pressedGroup = group ?? null;
         this.over = w.id;
       })
       .on_mouse_move((_e, cx) => {
         const source = spaces().find(s => s.id === this.pressed);
-        const over = source && (source.machine ?? null) === (w.machine ?? null) ? w.id : null;
+        const over = source && (source.machine ?? null) === (w.machine ?? null) && this.pressedGroup === (group ?? null) ? w.id : null;
         if (this.pressed !== null && this.over !== over) {
           this.over = over;
           cx.notify();
@@ -466,9 +528,10 @@ export default class Spaces extends View {
       );
   }
 
-  tabRow({ w, tree }, tab, t, program) {
+  tabRow({ w, tree, group }, tab, t, program) {
     const active = w.active && tab.active;
-    return h_flex().id(`space-tab-${tab.id}`).h(26).flex_none().pl(tree ? 65 : 43).pr(8).gap(7)
+    return h_flex().id(`space-tab-${tab.id}`).h(26).flex_none().relative().pl((tree ? 65 : 43) + (group ? 12 : 0)).pr(8)
+      .when(Boolean(group), (el) => el.child(guide(t))).gap(7)
       .items_center().rounded(6).text_size(12).text_color(active ? t.foreground : t.muted)
       .when(active, el => el.bg(t.selected))
       .hover(s => s.bg(t.hover)).cursor_pointer()
