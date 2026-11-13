@@ -22,11 +22,22 @@ A saved custom Herdr layout with spaces, nested worktrees, and tab rows in the s
 - Show more of the path when two parent-folder groups on one machine have the same name, for example `work/repos` and `old/repos`.
 - Group agents by parent folder in the Agents list. Click the sort icon on the Agents header, then select **Grouped by folder**. The groups are the same as in the Spaces list.
 
+## Files view: copy path
+
+The `files-tree` mod is a copy of Herdr's shipped `files` mod with type icons and a copy-path action.
+
+- Each row has an icon by type, in a theme color: code, JSON, config, text, image, shell script, archive, media, lock, Git files, and open or closed folders.
+- Click a row to select it. Hover or select a row to show a copy icon. Click it to copy the full path. The icon changes to a check mark for a short time.
+- Right-click a row to copy its path at once.
+- The header has a copy button and a status line that shows the selected path, or the path that you copied.
+- On local Windows, the path uses backslashes.
+
 ## Files
 
 - `layouts/spaces-tree.json`: the custom layout.
 - `mods/spaces-tree/main.js`: the custom spaces panel.
 - `mods/spaces-tree/mod.json`: the mod metadata.
+- `mods/files-tree/`: the Files view with icons and copy path.
 - `mods/agents-tree/`: a copy of Herdr's shipped `agents` mod, with the folder grouping added. It reads the groups that `spaces-tree` publishes in the shared value `spaces.groups`. If `spaces-tree` is not loaded, all agents are in one "Other" group.
 
 The layout uses Herdr's shipped mods for the other panels and controls. Those mods and their icons are not copied here. This copy was made from a layout and mod cloned from Herdr 0.1.14.
@@ -37,13 +48,14 @@ Generated type files and editor configuration are not included. Live spaces, tab
 
 1. Install and start Herdr.
 2. Copy `layouts/spaces-tree.json` into `%USERPROFILE%\.config\herdr-app\layouts\`.
-3. Copy the whole `mods/spaces-tree` and `mods/agents-tree` folders into `%USERPROFILE%\.config\herdr-app\mods\`.
+3. Copy the whole `mods/spaces-tree`, `mods/agents-tree`, and `mods/files-tree` folders into `%USERPROFILE%\.config\herdr-app\mods\`.
 4. If these names already exist, back up the existing files before you replace them.
 5. Check the mod and select the layout in PowerShell:
 
 ```powershell
 herdr-app check "$env:USERPROFILE\.config\herdr-app\mods\spaces-tree"
 herdr-app check "$env:USERPROFILE\.config\herdr-app\mods\agents-tree"
+herdr-app check "$env:USERPROFILE\.config\herdr-app\mods\files-tree"
 herdr-app do layout.switch --name spaces-tree
 ```
 

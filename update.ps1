@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 $sourceLayout = Join-Path $PSScriptRoot 'layouts/spaces-tree.json'
-$modNames = @('spaces-tree', 'agents-tree')
+$modNames = @('spaces-tree', 'agents-tree', 'files-tree')
 $configDir = Join-Path $env:USERPROFILE '.config/herdr-app'
 $layoutsDir = Join-Path $configDir 'layouts'
 $modsDir = Join-Path $configDir 'mods'
